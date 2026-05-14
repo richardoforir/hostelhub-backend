@@ -1,0 +1,420 @@
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
+const asyncHandler = require(
+  'express-async-handler'
+);
+
+const User = require('../models/User');
+
+const sendEmail = require(
+  '../utils/sendEmail'
+);
+
+const {
+  createNotification,
+} = require('../services/notificationService');
+
+// REGISTER USER
+const registerUser = asyncHandler(
+  async (req, res) => {
+    const {
+      name,
+      email,
+      password,
+      gender,
+      role = 'student',
+    } = req.body;
+
+    // Check required fields
+    if (
+      !name ||
+      !email ||
+      !password
+    ) {
+      res.status(400);
+
+      throw new Error(
+        'Please provide all fields'
+      );
+    }
+
+    // Check if user already exists
+    const existingUser =
+      await User.findOne({ email });
+
+    if (existingUser) {
+      res.status(400);
+
+      throw new Error(
+        'User already exists'
+      );
+    }
+
+    // Create user
+    const user = await User.create({
+      name,
+      email,
+      password,
+      gender,
+      role: ['student', 'owner'].includes(role)
+        ? role
+        : 'student',
+    });
+
+    // Generate verification token
+    const verificationToken =
+      user.generateEmailVerificationToken();
+
+    await user.save();
+
+    const verificationUrl =
+      `${process.env.FRONTEND_URL}/verify-email/${verificationToken}`;
+
+    const message = `
+      <p>Welcome to HostelHub.</p>
+      <p>Click the link below to verify your email address:</p>
+      <p><a href="${verificationUrl}">${verificationUrl}</a></p>
+      <p>This link expires in 24 hours.</p>
+    `;
+
+    try {
+      await sendEmail({
+        email: user.email,
+        subject:
+          'Verify your HostelHub email',
+        message,
+      });
+
+      await createNotification({
+        user: user._id,
+        title: 'Verify your account',
+        message:
+          'A verification email has been sent to your email address.',
+        type: 'account',
+      });
+    } catch (error) {
+      console.error(
+        'Email verification send failed:',
+        error.message
+      );
+    }
+
+    res.status(201).json({
+      message:
+        'User registered successfully. Please verify your email.',
+
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        isVerified:
+          user.isVerified,
+      },
+    });
+  }
+);
+
+// LOGIN USER
+const loginUser = asyncHandler(
+  async (req, res) => {
+    const { email, password } =
+      req.body;
+
+    // Check required fields
+    if (!email || !password) {
+      res.status(400);
+
+      throw new Error(
+        'Please provide email and password'
+      );
+    }
+
+    // Check if user exists
+    const user =
+      await User.findOne({ email });
+
+    if (!user) {
+      res.status(400);
+
+      throw new Error(
+        'Invalid credentials'
+      );
+    }
+
+    // CHECK IF VERIFIED
+    //if (!user.isVerified) {
+      //res.status(401);
+
+      //throw new Error(
+        //'Please verify your email first'
+    //  );
+   // }
+
+    // Compare password
+    const isMatch =
+      await bcrypt.compare(
+        password,
+        user.password
+      );
+
+    if (!isMatch) {
+      res.status(400);
+
+      throw new Error(
+        'Invalid credentials'
+      );
+    }
+
+    // Generate JWT Token
+    const token = jwt.sign(
+      {
+        id: user._id,
+        role: user.role,
+      },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: '7d',
+      }
+    );
+
+    res.status(200).json({
+      message: 'Login successful',
+
+      token,
+
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    });
+  }
+);
+
+// GET CURRENT USER
+const getMe = asyncHandler(
+  async (req, res) => {
+    const user = await User.findById(
+      req.user.id
+    ).select('-password');
+
+    res.status(200).json(user);
+  }
+);
+
+// FORGOT PASSWORD
+const forgotPassword = asyncHandler(
+  async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+      res.status(400);
+
+      throw new Error(
+        'Please provide an email'
+      );
+    }
+
+    const user =
+      await User.findOne({ email });
+
+    if (!user) {
+      res.status(404);
+
+      throw new Error(
+        'User not found'
+      );
+    }
+
+    const resetToken =
+      crypto
+        .randomBytes(32)
+        .toString('hex');
+
+    user.resetPasswordToken =
+      crypto
+        .createHash('sha256')
+        .update(resetToken)
+        .digest('hex');
+
+    user.resetPasswordExpire =
+      Date.now() + 10 * 60 * 1000;
+
+    await user.save({
+      validateBeforeSave: false,
+    });
+
+    const resetUrl =
+      `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+
+    const message = `
+      <p>You requested a password reset for your HostelHub account.</p>
+      <p>Click the link below to reset your password:</p>
+      <p><a href="${resetUrl}">${resetUrl}</a></p>
+      <p>This link expires in 10 minutes.</p>
+      <p>If you did not request this, you can ignore this email.</p>
+    `;
+
+    try {
+      await sendEmail({
+        email: user.email,
+        subject:
+          'HostelHub Password Reset',
+        message,
+      });
+
+      await createNotification({
+        user: user._id,
+        title: 'Password reset requested',
+        message:
+          'A password reset email has been sent to your email address.',
+        type: 'account',
+      });
+    } catch (error) {
+      user.resetPasswordToken =
+        undefined;
+
+      user.resetPasswordExpire =
+        undefined;
+
+      await user.save({
+        validateBeforeSave: false,
+      });
+
+      res.status(500);
+
+      throw new Error(
+        'Email could not be sent'
+      );
+    }
+
+    res.status(200).json({
+      message:
+        'Password reset email sent',
+    });
+  }
+);
+
+// RESET PASSWORD
+const resetPassword = asyncHandler(
+  async (req, res) => {
+    const { password } = req.body;
+
+    if (!password) {
+      res.status(400);
+
+      throw new Error(
+        'Please provide a new password'
+      );
+    }
+
+    const hashedToken =
+      crypto
+        .createHash('sha256')
+        .update(req.params.token)
+        .digest('hex');
+
+    // Find user
+    const user = await User.findOne({
+      resetPasswordToken:
+        hashedToken,
+
+      resetPasswordExpire: {
+        $gt: Date.now(),
+      },
+    });
+
+    if (!user) {
+      res.status(400);
+
+      throw new Error(
+        'Invalid or expired token'
+      );
+    }
+
+    user.password =
+      password;
+
+    // Clear reset fields
+    user.resetPasswordToken =
+      undefined;
+
+    user.resetPasswordExpire =
+      undefined;
+
+    await user.save();
+
+    res.status(200).json({
+      message:
+        'Password reset successful',
+    });
+  }
+);
+
+// VERIFY EMAIL
+const verifyEmail = asyncHandler(
+  async (req, res) => {
+    // Hash token
+    const hashedToken =
+      crypto
+        .createHash('sha256')
+        .update(req.params.token)
+        .digest('hex');
+
+    // Find user
+    const user = await User.findOne({
+      emailVerificationToken:
+        hashedToken,
+
+      emailVerificationExpires: {
+        $gt: Date.now(),
+      },
+    });
+
+    if (!user) {
+      res.status(400);
+
+      throw new Error(
+        'Invalid or expired verification token'
+      );
+    }
+
+    // Verify user
+    user.isVerified = true;
+
+    // Clear verification fields
+    user.emailVerificationToken =
+      undefined;
+
+    user.emailVerificationExpires =
+      undefined;
+
+    await user.save();
+
+    await createNotification({
+      user: user._id,
+      title: 'Account verified',
+      message:
+        'Your HostelHub account has been verified successfully.',
+      type: 'account',
+    });
+
+    res.status(200).json({
+      message:
+        'Email verified successfully',
+    });
+  }
+);
+
+module.exports = {
+  registerUser,
+  loginUser,
+  getMe,
+  forgotPassword,
+  resetPassword,
+  verifyEmail,
+};

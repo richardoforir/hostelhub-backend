@@ -1,0 +1,205 @@
+const asyncHandler =
+  require(
+    'express-async-handler'
+  );
+
+const Booking =
+  require('../models/Booking');
+
+const Hostel =
+  require('../models/Hostel');
+
+const Room =
+  require('../models/Room');
+
+const Notification =
+  require('../models/Notification');
+
+const getStudentDashboard =
+  asyncHandler(
+    async (req, res) => {
+      const studentId =
+        req.user.id;
+
+      const bookings =
+        await Booking.find({
+          student: studentId,
+        })
+          .populate(
+            'hostel',
+            'name location'
+          )
+          .populate(
+            'room',
+            'roomType price'
+          )
+          .sort({
+            createdAt: -1,
+          });
+
+      // STATS
+      const totalBookings =
+        bookings.length;
+
+      const activeBookings =
+        bookings.filter(
+          (booking) =>
+            booking.bookingStatus ===
+            'approved'
+        ).length;
+
+      const pendingBookings =
+        bookings.filter(
+          (booking) =>
+            booking.bookingStatus ===
+            'pending'
+        ).length;
+
+      const totalPayments =
+        bookings
+          .filter(
+            (booking) =>
+              booking.paymentStatus ===
+              'paid'
+          )
+          .reduce(
+            (
+              total,
+              booking
+            ) =>
+              total +
+              booking.amount,
+            0
+          );
+
+      res.status(200).json({
+        stats: {
+          totalBookings,
+          activeBookings,
+          pendingBookings,
+          totalPayments,
+        },
+
+        recentBookings:
+          bookings.slice(0, 5),
+      });
+    }
+  );
+
+const getOwnerDashboard =
+  asyncHandler(
+    async (req, res) => {
+      const ownerId = req.user.id;
+
+      // 1. GET ALL HOSTELS OWNED BY THIS OWNER
+      const hostels =
+        await Hostel.find({
+          owner: ownerId,
+        });
+
+      const hostelIds = hostels.map(
+        (h) => h._id
+      );
+
+      const totalHostels =
+        hostels.length;
+
+      // 2. GET ALL ROOMS IN THESE HOSTELS
+      const rooms = await Room.find({
+        hostel: { $in: hostelIds },
+      });
+
+      const totalRooms = rooms.length;
+
+      // 3. CALCULATE OCCUPANCY
+      const totalCapacity =
+        rooms.reduce(
+          (sum, room) =>
+            sum + room.capacity,
+          0
+        );
+
+      const availableBeds =
+        rooms.reduce(
+          (sum, room) =>
+            sum + room.availableBeds,
+          0
+        );
+
+      const occupiedBeds =
+        totalCapacity -
+        availableBeds;
+
+      const occupancyRate =
+        totalCapacity > 0
+          ? Math.round(
+              (occupiedBeds /
+                totalCapacity) *
+                100
+            )
+          : 0;
+
+      // 4. BOOKING STATS & REVENUE
+      const allBookings = await Booking.find({
+        hostel: { $in: hostelIds },
+      });
+
+      const totalBookings = allBookings.length;
+
+      const approvedBookings = allBookings.filter(
+        (booking) => booking.bookingStatus === 'approved'
+      ).length;
+
+      const totalRevenue = allBookings
+        .filter(
+          (booking) =>
+            booking.paymentStatus === 'paid' &&
+            booking.bookingStatus === 'approved'
+        )
+        .reduce((sum, booking) => sum + (booking.amount || 0), 0);
+
+      // 5. NOTIFICATIONS
+      const notificationsCount =
+        await Notification.countDocuments({
+          user: ownerId,
+          read: false,
+        });
+
+      // 6. RECENT BOOKINGS
+      const recentBookings =
+        await Booking.find({
+          hostel: { $in: hostelIds },
+        })
+          .populate(
+            'student',
+            'name email'
+          )
+          .populate(
+            'room',
+            'roomType price'
+          )
+          .populate(
+            'hostel',
+            'name'
+          )
+          .sort({ createdAt: -1 })
+          .limit(5);
+
+      res.status(200).json({
+        success: true,
+        totalHostels,
+        totalRooms,
+        totalBookings,
+        approvedBookings,
+        totalRevenue,
+        occupancyRate,
+        notificationsCount,
+        recentBookings,
+      });
+    }
+  );
+
+module.exports = {
+  getStudentDashboard,
+  getOwnerDashboard,
+};
