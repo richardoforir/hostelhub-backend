@@ -468,7 +468,12 @@ const initializePayment =
                 .email,
             amount,
             reference,
-            callback_url: `${getFrontendUrl()}/payments/verify?reference=${reference}`,
+            callback_url:
+              req.body.callback_url ||
+              `${
+                process.env.CLIENT_URL ||
+                getFrontendUrl()
+              }/payments/verify`,
             metadata: {
               bookingId:
                 booking._id.toString(),
