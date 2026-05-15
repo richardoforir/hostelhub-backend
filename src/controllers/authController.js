@@ -69,6 +69,22 @@ const registerUser = asyncHandler(
 
     await user.save();
 
+    // 1. Return the API response immediately after user creation and token generation
+    res.status(201).json({
+      message:
+        'User registered successfully. Please verify your email.',
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        isVerified: user.isVerified,
+      },
+    });
+
+    // 2. Move email sending to a non-blocking async task
+    // 3. Add proper try/catch around email sending
+    // 4. Ensure registration never hangs if email fails
     const verificationUrl =
       `${process.env.FRONTEND_URL}/verify-email/${verificationToken}`;
 
@@ -79,41 +95,26 @@ const registerUser = asyncHandler(
       <p>This link expires in 24 hours.</p>
     `;
 
-    try {
-      await sendEmail({
-        email: user.email,
-        subject:
-          'Verify your HostelHub email',
-        message,
-      });
+    // Background tasks - Fire and forget with internal error handling
+    (async () => {
+      try {
+        await sendEmail({
+          email: user.email,
+          subject: 'Verify your HostelHub email',
+          message,
+        });
 
-      await createNotification({
-        user: user._id,
-        title: 'Verify your account',
-        message:
-          'A verification email has been sent to your email address.',
-        type: 'account',
-      });
-    } catch (error) {
-      console.error(
-        'Email verification send failed:',
-        error.message
-      );
-    }
-
-    res.status(201).json({
-      message:
-        'User registered successfully. Please verify your email.',
-
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        isVerified:
-          user.isVerified,
-      },
-    });
+        await createNotification({
+          user: user._id,
+          title: 'Verify your account',
+          message: 'A verification email has been sent to your email address.',
+          type: 'account',
+        });
+      } catch (error) {
+        // Logging the error instead of throwing prevents the request from hanging
+        console.error('Registration background task failed:', error.message);
+      }
+    })();
   }
 );
 
